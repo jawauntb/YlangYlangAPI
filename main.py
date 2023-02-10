@@ -1,11 +1,9 @@
 import os
-import json
 import base64
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from ylangchain import define_tools, create_search_agent, run_agent_executor
 from replit import db
-from langchain.llms import OpenAI
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.vectorstores.faiss import FAISS
@@ -20,8 +18,7 @@ app = Flask(__name__)
 CORS(app)
 
 
-def encode_file_contents(file):
-  file_contents = file.read()
+def encode_file_contents(file_contents):
   return base64.b64encode(file_contents).decode('utf-8')
 
 
@@ -36,17 +33,19 @@ def handle_docs():
     documents_copy = [dict(document) for document in documents]
     for document in documents_copy:
       if 'file_contents' in document:
-        decoded_doc = decode_file_contents(document['file_contents'])
+        decoded_doc = decode_file_contents(
+          document['file_contents'].encode('utf-8'))
         document['file_contents'] = decoded_doc.decode()
     return jsonify(documents_copy)
   elif request.method == 'POST':
     file = request.files['file']
     filename = file.filename
-    file_contents = encode_file_contents(file.read())
+    file_contents = file.read()
+    encoded_file_contents = encode_file_contents(file_contents)
     document = {
       'id': len(documents),
       'name': filename,
-      'file_contents': file_contents
+      'file_contents': encoded_file_contents
     }
     documents.append(document)
     db["documents"] = documents
