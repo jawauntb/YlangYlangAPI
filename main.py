@@ -1,9 +1,11 @@
 import os
+import json
 import base64
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from ylangchain import define_tools, create_search_agent, run_agent_executor
 from replit import db
+from langchain.llms import OpenAI
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.vectorstores.faiss import FAISS
@@ -18,12 +20,18 @@ app = Flask(__name__)
 CORS(app)
 
 
-def encode_file_contents(file_contents):
+def encode_file_contents(file):
+  file_contents = file.read()
   return base64.b64encode(file_contents).decode('utf-8')
 
 
 def decode_file_contents(file_contents):
   return base64.b64decode(file_contents.encode('utf-8'))
+
+
+@app.route('/db', methods=['GET'])
+def get_db():
+  return jsonify(db['ylang_queries'])
 
 
 @app.route('/docs', methods=['GET', 'POST'])
@@ -33,42 +41,32 @@ def handle_docs():
     documents_copy = [dict(document) for document in documents]
     for document in documents_copy:
       if 'file_contents' in document:
-        decoded_doc = decode_file_contents(
-          document['file_contents'].encode('utf-8'))
-        document['file_contents'] = decoded_doc.decode()
+        decoded_doc = decode_file_contents(document['file_contents'])
+        document['file_contents'] = decoded_doc.decode('utf-8')
     return jsonify(documents_copy)
   elif request.method == 'POST':
     file = request.files['file']
     filename = file.filename
-    file_contents = file.read()
-    encoded_file_contents = encode_file_contents(file_contents)
+    file_contents = encode_file_contents(file.read())
     document = {
       'id': len(documents),
       'name': filename,
-      'file_contents': encoded_file_contents
+      'file_contents': file_contents
     }
     documents.append(document)
     db["documents"] = documents
     return jsonify(document), 201
 
 
-@app.route('/docs/<int:doc_id>', methods=['GET', 'DELETE'])
+@app.route('/docs/<int:doc_id>', methods=['DELETE'])
 def handle_doc(doc_id):
   documents = db["documents"]
   document = next((d for d in documents if d['id'] == doc_id), None)
   if not document:
     return 'Document not found', 404
-  if request.method == 'GET':
-    if 'file_contents' in document:
-      decoded_doc = decode_file_contents(
-        document['file_contents'].encode('utf-8'))
-      document['file_contents'] = decoded_doc.decode()
-      response = jsonify(document)
-      response.headers.add('Access-Control-Allow-Origin', '*')
-      response.headers.add('Access-Control-Allow-Methods', 'PATCH')
-      response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-      response.headers.add('Access-Control-Max-Age', 60 * 60 * 24 * 20)
-      return response
+  documents.remove(document)
+  db["documents"] = documents
+  return '', 204
 
 
 @app.route('/docs/int:doc_id/edits', methods=['PATCH'])
