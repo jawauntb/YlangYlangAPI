@@ -1,174 +1,131 @@
 import os
+import json
+import base64
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from langchain.utilities import RequestsWrapper
-from langchain import OpenAI, ConversationChain, LLMChain, PromptTemplate
-from langchain.agents import Tool
-from langchain.chains.conversation.memory import ConversationBufferMemory
-from langchain import ConversationChain, OpenAI, PromptTemplate, VectorDBQA, VectorDBQAWithSourcesChain, SerpAPIWrapper, LLMChain, LLMCheckerChain, LLMMathChain, SQLDatabase, SQLDatabaseChain
-from langchain.agents import ZeroShotAgent, Tool, AgentExecutor, ConversationalAgent
-from langchain.cache import InMemoryCache
-from langchain.chains.mapreduce import MapReduceChain
-from langchain.chains.hyde.base import HypotheticalDocumentEmbedder
-from langchain.chains import LLMRequestsChain, LLMChain
-from gpt_index import GPTListIndex, SimpleWebPageReader
-import re
+from ylangchain import define_tools, create_search_agent, run_agent_executor
+from replit import db
+from langchain.llms import OpenAI
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.vectorstores.faiss import FAISS
 
 openai_api_key = os.getenv("OPENAI_API_KEY")
 serpapi_api_key = os.getenv("SERPAPI_API_KEY")
 
-template = """Between >>> and <<< are the raw search result text from google.
-Extract the answer to the question '{query}' or say "not found" if the information is not contained.
-Use the format
-Extracted:<answer or "not found">
->>> {requests_result} <<<
-Extracted:"""
-
-PROMPT = PromptTemplate(
-  input_variables=["query", "requests_result"],
-  template=template,
-)
-
-requests_chain = LLMRequestsChain(llm_chain=LLMChain(
-  llm=OpenAI(temperature=0, openai_api_key=openai_api_key), prompt=PROMPT))
-
-
-def create_prompt(tools, prefix, suffix, input_variables):
-  prompt = ZeroShotAgent.create_prompt(tools=tools,
-                                       prefix=prefix,
-                                       suffix=suffix,
-                                       input_variables=input_variables)
-  return prompt
-
-
-def extract_links(text):
-  url_extract_pattern = "https?:\\/\\/(?:www\\.)?[-a-zA-Z0-9@:%._\\+~#=]{1,256}\\.[a-zA-Z0-9()]{1,6}\\b(?:[-a-zA-Z0-9()@:%_\\+.~#?&\\/=]+)"
-  links = re.findall(url_extract_pattern, text)
-  text_without_links = re.sub(url_extract_pattern, '', text)
-  return text_without_links, links
-
-
-def search_links_simple_reader(query, links):
-  documents = SimpleWebPageReader(html_to_text=True).load_data(links)
-  index = GPTListIndex(documents)
-  response = index.query(query, verbose=True)
-  return response
-
-
-reader_tool_desc = "useful for when you need to get specific content from a site. Use this tool instead of Requests tool, because Requests uses too many model tokens."
-
-
-def reader_func(q):
-  text, links = extract_links(q)
-  print("text:", text, links)
-  return search_links_simple_reader(text, links)
-
-
-def define_tools():
-  search = SerpAPIWrapper(serpapi_api_key=serpapi_api_key)
-  requests = RequestsWrapper()
-  # google = "https://www.google.com/search?q=" + query.replace(" ", "+")
-  # inputs = {
-  #     "query": query,
-  #     "url": google
-  # }
-  req_chain = requests_chain
-
-  tools = [
-    # Tool(
-    #   name="Google Query",
-    #   func=lambda q: req_chain(
-    #     {
-    #       "query": q,
-    #       "url": "https://www.google.com/search?q=" + q.replace(" ", "+")
-    #     }),
-    #   description=
-    #   "useful for when you need to get specific content about a topic, from Google. Input should be a specific url, and the output will be all the text on that page."
-    # ),
-    # Tool(
-    #   name="Requests",
-    #   func=lambda q: str(requests.run(q)),
-    #   description=
-    #   "useful for when you need to get specific content from a site. Input should be a specific url, and the output will be all the text on that page.",
-    # ),
-    Tool(name="Search",
-         func=search.run,
-         description=
-         "useful for when you need to answer questions about current events"),
-    # Tool(name="Link and Site Crawler",
-    #      func=lambda q: reader_func(q),
-    #      description=reader_tool_desc)
-  ]
-  return tools
-
-
-def create_llm_chain(llm, prompt, verbose=True):
-  return LLMChain(llm=llm, prompt=prompt, verbose=verbose)
-
-
-def create_agent(llm_chain, tools):
-  return ZeroShotAgent(llm_chain=llm_chain, tools=tools)
-
-
-def create_agent_executor(agent, tools, verbose):
-  return AgentExecutor.from_agent_and_tools(agent=agent,
-                                            tools=tools,
-                                            verbose=verbose)
-
-
-prefix = """Answer each question individually by using all of our tools to get the answer for each individual question. First, ask the base language model if it knows anything, then use our tools to search the internet. use wikipedia and google as well. Search the internet and looks at different links until you get the answer. Give answers with at least 3-5 sentences of substance.
-You have access to the following tools:"""
-suffix = """
-Questions: {input}
-{agent_scratchpad}"""
-
-
-def create_search_agent(tools):
-  # pre = template + " " + prefix
-  input = ["input", "agent_scratchpad"]
-  prompt = create_prompt(tools=tools,
-                         prefix=prefix,
-                         suffix=suffix,
-                         input_variables=input)
-  memory = ConversationBufferMemory(memory_key="chat_history")
-  llm = OpenAI(temperature=0.8,
-               top_p=1,
-               frequency_penalty=0,
-               presence_penalty=0,
-               max_tokens=2000,
-               openai_api_key=openai_api_key)
-  llm_chain = create_llm_chain(llm=llm, prompt=prompt, verbose=True)
-
-  # agent = initialize_agent(
-  #     tools, llm_chain, agent="zero-shot-react-description", verbose=True, memory=memory)
-  agent = ZeroShotAgent(llm_chain=llm_chain, tools=tools, memory=memory)
-  return agent
-
-
-def run_agent_executor(agent, tools, query):
-  print('run_agent_executor')
-  agent_executor = create_agent_executor(agent, tools, True)
-  result = agent_executor.run(input=query, verbose=True)
-  return result
-
-
-# tools = define_tools()
-# agent = create_search_agent(tools)
-# company = "Google"
-# q="Query"
-# run_agent_executor(agent, tools, query=q, company=company)
+# db['ylang_queries']
+# db['documents']
 
 app = Flask(__name__)
 CORS(app)
 
 
+def encode_file_contents(file):
+  file_contents = file.read()
+  return base64.b64encode(file_contents).decode('utf-8')
+
+
+def decode_file_contents(file_contents):
+  return base64.b64decode(file_contents.encode('utf-8'))
+
+
+@app.route('/docs', methods=['GET', 'POST'])
+def handle_docs():
+  documents = db["documents"]
+  if request.method == 'GET':
+    documents_copy = [dict(document) for document in documents]
+    for document in documents_copy:
+      if 'file_contents' in document:
+        decoded_doc = decode_file_contents(document['file_contents'])
+        document['file_contents'] = decoded_doc.decode()
+    return jsonify(documents_copy)
+  elif request.method == 'POST':
+    file = request.files['file']
+    filename = file.filename
+    file_contents = encode_file_contents(file.read())
+    document = {
+      'id': len(documents),
+      'name': filename,
+      'file_contents': file_contents
+    }
+    documents.append(document)
+    db["documents"] = documents
+    return jsonify(document), 201
+
+
+@app.route('/docs/<int:doc_id>', methods=['GET', 'DELETE'])
+def handle_doc(doc_id):
+  documents = db["documents"]
+  document = next((d for d in documents if d['id'] == doc_id), None)
+  if not document:
+    return 'Document not found', 404
+  if request.method == 'GET':
+    if 'file_contents' in document:
+      decoded_doc = decode_file_contents(
+        document['file_contents'].encode('utf-8'))
+      document['file_contents'] = decoded_doc.decode()
+      response = jsonify(document)
+      response.headers.add('Access-Control-Allow-Origin', '*')
+      response.headers.add('Access-Control-Allow-Methods', 'PATCH')
+      response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+      response.headers.add('Access-Control-Max-Age', 60 * 60 * 24 * 20)
+      return response
+
+
+@app.route('/docs/int:doc_id/edits', methods=['PATCH'])
+def handle_doc_edits(doc_id):
+  print('handle_doc_edits')
+  documents = db["documents"]
+  if not documents:
+    print('no documents in thing')
+    return 'Documents not found', 404
+  document = next((d for d in documents if d['id'] == doc_id), None)
+  if not document:
+    print('no document at doc id', doc_id)
+    return 'Document not found', 404
+  data = request.get_json()
+  document.update(data)
+  db["documents"] = documents
+  response = jsonify(document)
+  response.headers.add('Access-Control-Allow-Origin', '*')
+  response.headers.add('Access-Control-Allow-Methods', 'PATCH')
+  response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+  response.headers.add('Access-Control-Max-Age', 60 * 60 * 24 * 20)
+  return response
+
+
 @app.route('/ylang', methods=['POST'])
 def receive_input():
   query = request.get_json().get('query')
-  print('query', query)
   tools = define_tools()
-  agent = create_search_agent(tools)
-  result = run_agent_executor(agent, tools, query=query)
+  search_agent = create_search_agent(tools)
+  result = run_agent_executor(search_agent, tools, query=query)
+
+  db['ylang_queries'].append({'query': query, 'result': result})
+  return jsonify(result)
+
+
+def run_query_document(query, file_contents, openai_key):
+  document = file_contents
+  text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+  texts = text_splitter.split_text(document)
+  embeddings = OpenAIEmbeddings(openai_api_key=openai_key)
+  docsearch = FAISS.from_texts(texts, embeddings)
+  docs = docsearch.similarity_search(query)
+  return docs
+
+
+@app.route('/docs/int:doc_id/query', methods=['POST'])
+def query_document(doc_id):
+  documents = db["documents"]
+  document = documents[doc_id]
+  next((d for d in documents if d['id'] == doc_id), None)
+  if not document:
+    return 'Document not found', 404
+  query = request.get_json().get('query')
+  file_contents = decode_file_contents(document['file_contents']).decode()
+  openai_key = os.getenv("OPENAI_API_KEY")
+  result = run_query_document(query, file_contents, openai_key)
   return jsonify(result)
 
 
