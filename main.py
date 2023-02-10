@@ -1,11 +1,9 @@
 import os
-import json
 import base64
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from ylangchain import define_tools, create_search_agent, run_agent_executor
 from replit import db
-from langchain.llms import OpenAI
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.vectorstores.faiss import FAISS
